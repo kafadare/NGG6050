@@ -92,8 +92,8 @@ upperBounds = [1000 1000];
 inverse_RTs = 1 ./ RTs;
 
 % Compute the mean and standard deviation of the inverse values
-muR = mean(inverse_RTs);
-deltaS = std(inverse_RTs);
+deltaS = 1/std(inverse_RTs);
+muR = mean(inverse_RTs)*deltaS;
 initialValues = [muR, deltaS];
 
 %%  4. Run the fits
