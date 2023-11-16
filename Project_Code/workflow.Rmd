@@ -1,0 +1,900 @@
+---
+title: "Workflow"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+--- 
+#Set up packages and functions
+``` {r setup}
+setwd("/u/project/gandalm/kafadare/GandalLab")
+output_dir <- ("/u/project/gandalm/kafadare/comb_data/new_data/")
+plot_dir <- ("/u/project/gandalm/kafadare/plots/")
+source("data_functions.R")
+source("analysis_fcts.R")
+# List of required packages
+#required_packages <- c("magrittr", "genio", "dplyr", "BiocManager", "SummarizedExperiment")
+required_packages <- c("magrittr", "dplyr", "data.table", "DESeq2", "WGCNA", "sva", "ggplot2")
+# Install or load missing packages
+load_install_pkg(required_packages)
+library(SummarizedExperiment)
+```
+
+
+
+#Remove low expressed genes from fetal data
+##load all fetal data before remoal
+```{r}
+#Fetal
+fetal_counts_path <- "/u/project/gandalm/cindywen/isoform_twas/salmon/expression.final/gene.noVersion.scaled.counts.tsv"
+fetal_tpm_path <- "/u/project/gandalm/cindywen/isoform_twas/salmon/expression.final/gene.noVersion.TPM.tsv"
+fetal_meta_path <- "/u/project/gandalm/cindywen/isoform_twas/eqtl_new/metadata_654.tsv"
+fetal_all <- load_data(names = c("counts", "tpm", "meta"), fetal_counts_path, fetal_tpm_path, fetal_meta_path) #before rm low
+#get EUR subsample for fetal samples
+fetal_all$meta$Subject <- id_format_fix(fetal_all$meta$Subject)
+fetal_all$meta <- subset(fetal_all$meta, ancestry == "eur")
+ids <- fetal_all$meta$Subject %>% intersect(.,colnames(fetal_all$counts))
+fetal_all$counts <- fetal_all$counts[,ids]
+fetal_all$tpm <- fetal_all$tpm[,ids]
+
+fetal_all$counts$genid <- rownames(fetal_all$counts)
+fetal_all$tpm$genid <- rownames(fetal_all$tpm)
+
+# write.table(fetal_all$meta, file = paste0(output_dir,"fetal_eur_meta.tsv"), row.names = FALSE, sep = "\t")
+# write.table(fetal_all$counts, file = paste0(output_dir,"fetal_eur_preRM_counts.tsv"), row.names = FALSE, sep = "\t")
+# write.table(fetal_all$tpm, file = paste0(output_dir,"fetal_eur_preRM_tpm.tsv"), row.names = FALSE, sep = "\t")
+
+# gtf_fetal_all <- get_gene_info(fetal_all$counts$genid)
+# write.table(gtf_fetal_all, file = paste0(output_dir,"gene_info_fetal_preRM.tsv"), row.names = FALSE, sep = "\t")
+
+gtf_fetal_all <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_fetal_preRM.tsv", data.table = F)
+
+dim(fetal_all$counts) #292 samples + 1 genid col, 61996 genes
+dim(fetal_all$meta) #292 samples/column
+dim(gtf_fetal_all)# 58330 genes
+```
+##plot gene expression density fetal all
+```{r}
+fetal_all_plot_counts <- prep_datExp(fetal_all$counts, gtf_fetal_all) %>% plot_gen_density(., title_str = "Fetal Counts EUR Pre-RM", ylim = c(0, 0.75))
+fetal_all_plot_tpm <- prep_datExp(fetal_all$tpm, gtf_fetal_all) %>% plot_gen_density(., title_str = "Fetal Tpm EUR Pre-RM", ylim = c(0, 2.0))
+```
+
+##Remove fetal lowly expressed genes
+```{r}
+#Remove lowly expressed genes <0.1 25%
+fetal_lowrm_counts <- prep_datExp(fetal_all$counts, gtf_fetal_all) %>% rm_low(., fetal_all$tpm, gtf_fetal_all, cutoff = 0.1, percent = 0.25)
+fetal_lowrm_tpm <- prep_datExp(fetal_all$tpm, gtf_fetal_all) %>% rm_low(., fetal_all$tpm, gtf_fetal_all, cutoff = 0.1, percent = 0.25)
+
+print(cat("Number of genes before removal:", dim(fetal_all$counts), "Number of genes after removing lowly expressed:",dim(fetal_lowrm_counts), sep='\n'))
+fetal_lowrm_counts$genid <- rownames(fetal_lowrm_counts)
+fetal_lowrm_tpm$genid <- rownames(fetal_lowrm_tpm)
+
+write.table(fetal_lowrm_counts, file = paste0(output_dir,"fetal_eur_rmlow_counts.tsv"), row.names = F, sep = "\t")
+write.table(fetal_lowrm_tpm, file = paste0(output_dir,"fetal_eur_rmlow_tpm.tsv"), row.names = F, sep = "\t")
+```
+
+##plot fetal after removing low expressed
+```{r}
+#plot both
+fetal_rmLow_plot_counts <- prep_datExp(fetal_lowrm_counts, gtf_fetal_all) %>% plot_gen_density(., title_str = "Fetal Counts EUR LowRm", ylim = c(0, 0.75))
+fetal_rmLow_plot_tpm <- prep_datExp(fetal_lowrm_tpm, gtf_fetal_all) %>% plot_gen_density(., title_str = "Fetal Tpm EUR LowRM", ylim = c(0, 2.0))
+```
+
+#Format adult metadata
+Do not need to run again, output already saved.
+```{r}
+adult_meta_path <- "/u/project/gandalm/kafadare/cov_hcp0_gene.txt" 
+adult_meta <- fread(adult_meta_path, data.table = F)
+adult_meta <- as.data.frame(t(adult_meta))
+colnames(adult_meta) <- adult_meta[1, ]
+adult_meta <- adult_meta[-1, ]
+#add adult data batch column in metadata df
+adult_se <- readRDS("/u/home/k/kafadare/project-gandalm/AdultBigBrain_gene_exp_raw_042923.RDS")
+batch_index <- match(rownames(adult_meta), colData(adult_se)$names)
+adult_meta$study <- colData(adult_se)$batch[batch_index] 
+
+#fix subject names
+adult_meta$Subject <- rownames(adult_meta) %>% id_format_fix(.)
+rownames(adult_meta) <- id_format_fix(rownames(adult_meta)) 
+
+#filter for EUR ancestry in adult metadata
+adult_ancestry <-  read.table("/u/project/gandalm/kafadare/pops.txt", header = F, sep = "\t", col.names = c("id", "ancestry"))
+adult_ancestry$id <- id_format_fix(adult_ancestry$id)
+missing_ids <- rownames(adult_meta)[!(rownames(adult_meta) %in% adult_ancestry$id)] # 61 ids "missing" from the ancestry file
+adult_meta <- adult_meta[(adult_meta$Subject %in% adult_ancestry$id),]
+ancestry_index <- match(rownames(adult_meta),adult_ancestry$id)
+adult_meta$ancestry <- adult_ancestry$ancestry[ancestry_index]
+dim(adult_meta)
+adult_meta <- subset(adult_meta, ancestry == "EUR")
+dim(adult_meta)
+
+write.table(adult_meta, file = paste0(output_dir,"adult_eur_meta.tsv"), row.names = FALSE, sep = "\t")
+```
+
+
+
+
+
+#Load adult & fetal pre-processed data
+Load saved fetal files
+Subset adult for Eur ancestry
+```{r}
+#fetal paths -- load here if not running above
+fetal_counts_path <- "/u/project/gandalm/kafadare/comb_data/new_data/fetal_eur_rmlow_counts.tsv"
+#fetal_tpm_path <- "/u/project/gandalm/kafadare/comb_data/new_data/fetal_eur_rmlow_tpm.tsv"
+fetal_meta_path <- "/u/project/gandalm/kafadare/comb_data/new_data/fetal_eur_meta.tsv"
+#adult paths
+adult_counts_path <- "/u/project/gandalm/kafadare/adult.counts.scaled.tsv"
+#adult_tpm_path <- "/u/project/gandalm/kafadare/adult.TPM.tsv"
+##use this path if metadata cleanup above already run & result saved
+adult_meta_path <- "/u/project/gandalm/kafadare/comb_data/new_data/adult_eur_meta.tsv"
+#load data for fetal & adult
+fetal <- load_data(names = c("counts", "meta"), fetal_counts_path, fetal_meta_path)
+adult <- load_data(names = c("counts", "meta"), adult_counts_path, adult_meta_path)
+
+colnames(adult$counts) <- id_format_fix(colnames(adult$counts))
+#colnames(adult$tpm) <- id_format_fix(colnames(adult$tpm))
+ids <- adult$meta$Subject %>% intersect(.,colnames(adult$counts))
+adult$counts <- adult$counts[,ids]
+#ids <- rownames(adult$meta) %>% intersect(.,colnames(adult$tpm))
+#adult$tpm <- adult$tpm[,ids]
+#remove gencode version number from the adult dataset gene id
+rownames(adult$counts) <- substring(rownames(adult$counts), 1, 15)
+#rownames(adult$tpm) <- substring(rownames(adult$tpm), 1, 15)
+
+adult$counts$genid <- rownames(adult$counts)
+dim(adult$counts) # 32712 x 1708 (inc genid col)
+dim(fetal$counts) # 30853 x 293 (inc genid col)
+#adult$tpm$genid <- rownames(adult$tpm)
+```
+
+##get gene info for all adult EUR genes
+```{r}
+gtf_adult_eur <- get_gene_info(adult$counts$genid)
+dim(gtf_adult_eur)
+dim(adult$counts)
+write.table(gtf_adult_eur, file = paste0(output_dir,"gene_info_adult_eur.tsv"), row.names = FALSE, sep = "\t")
+```
+
+##plot adult EUR data (lowly expressed already removed)
+```{r}
+gtf_adult_eur <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_adult_eur.tsv", data.table = F)
+adult_eur_counts_plot <- prep_datExp(adult$counts, gtf_adult_eur) %>% plot_gen_density(., title_str = "Adult Counts EUR LowRm", ylim = c(0, 0.75))
+#adult_eur_tpm_plot <- prep_datExp(adult$tpm, gtf_adult_eur) %>% plot_gen_density(., title_str = "Adult Tpm EUR LowRM", ylim = c(0, 2.0))
+
+```
+
+
+#Merge genExp
+```{r}
+#get vector of shared genes and subset both fetal and adult data for NON-shared genes
+comb_genExp_counts <- merge(adult$counts, fetal$counts, by = "genid",suffixes = c(".a", ".f")) # 
+#comb_genExp_tpm <- merge(adult$tpm, fetal$tpm, by = "genid",suffixes = c(".a", ".f"))
+
+dim(comb_genExp_counts) #19057 x 2000, inc gen id column - 1999 samples
+fetal_only_genes <- fetal$counts[which(!(fetal$counts$genid %in% adult$counts$genid)),]
+dim(fetal_only_genes) #11796 x 293, inc gen id column - 292 samples 
+adult_only_genes <- adult$counts[which(!(adult$counts$genid %in% fetal$counts$genid)),]
+dim(adult_only_genes) #13655x1708, inc gen id column - 1707 samples
+
+write.table(comb_genExp_counts, file = paste0(output_dir,"combo_genExp_counts.tsv"), row.names = FALSE, sep = "\t")
+#write.table(comb_genExp_tpm, file = paste0(output_dir,"combo_genExp_tpm.tsv"), row.names = FALSE, sep = "\t")
+write.table(fetal_only_genes, file = paste0(output_dir,"fetal_only_genExp.tsv"), row.names = FALSE, sep = "\t")
+write.table(adult_only_genes, file = paste0(output_dir,"adult_only_genExp.tsv"), row.names = FALSE, sep = "\t")
+
+#get Chr number and start and end codon and strand +/-
+gtf_fetal_only <- get_gene_info(fetal_only_genes$genid)
+gtf_adult_only <- get_gene_info(adult_only_genes$genid)
+gtf_comb <- get_gene_info(comb_genExp_counts$genid)
+
+#save these gtf files too!! ^^^
+write.table(gtf_comb, file = paste0(output_dir,"gene_info_comb.tsv"), row.names = FALSE, sep = "\t")
+write.table(gtf_fetal_only, file = paste0(output_dir,"gene_info_fetal_only.tsv"), row.names = FALSE, sep = "\t")
+write.table(gtf_adult_only, file = paste0(output_dir,"gene_info_adult_only.tsv"), row.names = FALSE, sep = "\t")
+```
+
+#Merge meta
+plot age before merge, after merge
+plot log transform
+sex code
+F - 0
+M - 1
+```{r}
+#fetal_meta_path <- "/u/project/gandalm/kafadare/comb_data/new_data/fetal_eur_meta.tsv"
+# adult_meta_path <- "/u/project/gandalm/kafadare/comb_data/new_data/adult_eur_meta.tsv"
+#fetal <- load_data(names = c("meta"),fetal_meta_path)
+# adult <- load_data(names = c("meta"),adult_meta_path)
+
+#adult metadata cleanup
+dim(adult$meta) 
+colnames(adult$meta)
+# adult_gPCs <- adult$meta[,grep("gPC", colnames(adult$meta))]
+# adult_gPCs$Subject <- adult$meta$Subject
+# write.table(adult_gPCs, file = paste0(output_dir,"adult_gPCs.tsv"), row.names = FALSE, sep = "\t")
+adult$meta<- adult$meta[,-grep("gPC", colnames(adult$meta))]
+adult$meta$age2 <- NULL
+adult$meta$age <- as.numeric(adult$meta$age)
+adult$meta$logPcd <- log10(adult$meta$age*365)
+sum(is.na(adult$meta$sex))
+adult$meta$sex <- as.numeric(adult$meta$sex)
+
+#fetal metadata cleanup
+dim(fetal$meta)
+colnames(fetal$meta) <- c("Subject", "age", "sex", "inferSex", "trimester", "ancestry", "study", "pcw")
+fetal$meta$logPcd <- log10(fetal$meta$pcw*7)
+sum(is.na(fetal$meta$sex)) #41 without sex
+fetal$meta[which(is.na(fetal$meta$sex)),c('sex')] <- fetal$meta[which(is.na(fetal$meta$sex)),c('inferSex')] #total 41 without recorded sex, use inferred sex
+sum(is.na(fetal$meta$sex))#all replaced with inferSex
+identical(fetal$meta$sex, fetal$meta$inferSex)
+fetal$meta[which(fetal$meta$sex == "F"),c('sex')] <- "0"
+fetal$meta[which(fetal$meta$sex == "M"),c('sex')] <- "1"
+fetal$meta$sex <- as.numeric(fetal$meta$sex)
+
+#re-code repeating IDs
+f_ids <- which(fetal$meta$Subject %in% adult$meta$Subject)
+a_ids <- which(adult$meta$Subject %in% fetal$meta$Subject)
+
+fetal$meta$Subject[f_ids] <- paste0(fetal$meta$Subject[f_ids], ".f")
+adult$meta$Subject[a_ids] <- paste0(adult$meta$Subject[a_ids], ".a")
+
+#combine meta data
+meta <- merge(fetal$meta, adult$meta, all = T)
+write.table(meta, file = paste0(output_dir,"combined_meta.tsv"), row.names = FALSE, sep = "\t") 
+```
+##age plots
+```{r}
+fetal_age <- hist(fetal$meta$age)
+fetal_logPcd <- hist(fetal$meta$logPcd)
+
+adult_age <- hist(adult$meta$age)
+adult_logPcd <- hist(adult$meta$logPcd)
+
+comb_age <- hist(meta$age)
+comb_logPcd <- hist(meta$logPcd)
+summary(meta$age)
+plot(density(meta$age))
+plot(density(meta$logPcd))
+```
+
+
+#Load merged data, plot shared, adult only, fetal only
+files above saved, can load here
+``` {r}
+genExp <- fread("/u/project/gandalm/kafadare/comb_data/new_data/combo_genExp_counts.tsv", data.table = F)
+gtf <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_comb.tsv", data.table = F)
+meta <- fread("/u/project/gandalm/kafadare/comb_data/new_data/combined_meta.tsv", data.table = F) 
+
+fetal_only_genes <- fread("/u/project/gandalm/kafadare/comb_data/new_data/fetal_only_genExp.tsv", data.table = F)
+adult_only_genes <- fread("/u/project/gandalm/kafadare/comb_data/new_data/adult_only_genExp.tsv", data.table = F)
+gtf_fetal_only <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_fetal_only.tsv", data.table = F)
+gtf_adult_only <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_adult_only.tsv", data.table = F)
+
+#Combined Shared Genes
+combo_genExp_plot <- prep_datExp(genExp, gtf) %>% plot_gen_density(., title_str = "Combined Shared Genes Counts", ylim = c(0, 0.75))
+#Only in fetal
+fetal_only_plot <- prep_datExp(fetal_only_genes, gtf_fetal_only) %>% plot_gen_density(., title_str = "Only Fetal Genes Counts", ylim = c(0, 0.75))
+#only in adult
+adult_only_plot <- prep_datExp(adult_only_genes, gtf_adult_only) %>% plot_gen_density(., title_str = "Only Adult Genes Counts", ylim = c(0, 0.75))
+```
+
+
+#Normalize & ComBat batch-correct
+##Run norm & batch correct
+	- normalize - plot boxplot after norm
+	- batch correct - plot boxplot after combat
+		- plot svd of normalized counts & batch corrected counts
+```{r}
+# genExp <- prep_datExp(genExp, gtf)
+# norm_batch <- norm_batch(genExp, meta, paste0(output_dir, "processed/"))
+# genExp.final <- norm_batch$noCombat
+# combat_expr <- norm_batch$combat
+
+#can load pre-saved normalized & combat batch-corrected files here (code above)
+genExp.final <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.norm.noComBat.tsv", data.table = F)
+rownames(genExp.final) <- genExp.final$V1
+genExp.final$V1 <- NULL
+combat_expr <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.batch.processed.tsv", data.table = F)
+rownames(combat_expr) <- combat_expr$V1
+combat_expr$V1 <- NULL
+gtf <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_comb.tsv", data.table = F)
+meta <- fread("/u/project/gandalm/kafadare/comb_data/new_data/combined_meta.tsv", data.table = F) 
+
+# phenotype.bed
+gtf <- gtf %>% filter(genid %in% rownames(genExp.final))
+
+# prepare BED file
+setDT(combat_expr, keep.rownames = TRUE)
+bed <- merge(combat_expr, gtf, by.x = "rn", by.y = "genid", all = TRUE)
+bed <- as.data.frame(bed)
+
+bed <- bed[, c(ncol(bed)-3, ncol(bed)-2, ncol(bed)-1, ncol(bed), 1:(ncol(bed)-4))]
+
+# special note! strand; 0/1-based conversion
+bed$Chr <- gsub("chr","",bed$Chr)
+
+for (i in 1:dim(bed)[1]){
+	if (bed[i,4] == "+") {
+		gtf_start=bed[i,2]
+		bed[i,2]=gtf_start-1
+		bed[i,3]=gtf_start
+	}
+	else if (bed[i,4] == "-") {
+		gtf_end=bed[i,3]
+		bed[i,2]=gtf_end-1
+		bed[i,3]=gtf_end
+	}
+}
+
+bed <- bed[order(bed$Chr, bed$start),]
+
+bed$strand <- NULL
+colnames(bed)[1:4] <- c("Chr", "start", "end", "ID")
+
+write.table(bed, paste0(output_dir,"processed/","counts.scaled.normalized.bed"), quote=F, sep="\t", row.names=F, col.names=T)
+
+```
+##plots for ComBat
+```{r}
+genExp <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/combo_genExp_counts.tsv", header = T, data.table = F)
+rownames(genExp) <- genExp$genid
+genExp <- genExp[,-1]
+
+genExp.final <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.norm.noComBat.tsv", data.table = F)
+rownames(genExp.final) <- genExp.final$V1
+genExp.final <- genExp.final[,-1]
+
+combat_expr <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.batch.processed.tsv", data.table = F)
+rownames(combat_expr) <- combat_expr$V1
+combat_expr <- combat_expr[,-1]
+
+gtf <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_comb.tsv", data.table = F)
+meta <- fread("/u/project/gandalm/kafadare/comb_data/new_data/combined_meta.tsv", data.table = F) 
+
+genExp <- genExp[,which(colnames(genExp) %in% colnames(combat_expr))]
+
+data.batch <- c()
+  ##need to get data.batch
+  for (i in 1:ncol(genExp)) {
+    sample <- colnames(genExp)[i]
+    #match the sample to id in meta file and find corresponding "study"
+    data.batch[i] <- meta[which(meta$Subject %in% sample), "study"]
+  } 
+
+s <- svd(genExp - rowMeans(genExp))
+PC1 <- s$d[1]*s$v[,1]
+PC2 <- s$d[2]*s$v[,2]
+data <- data.frame(PC1, PC2, "Data" = factor(data.batch))
+ 
+    
+# data.batch1 <- c()
+#   ##need to get data.batch
+#   for (i in 1:ncol(combat_expr)) {
+#     sample <- colnames(combat_expr)[i]
+#     #match the sample to id in meta file and find corresponding "study"
+#     data.batch1[i] <- meta[which(meta$Subject %in% sample), "study"]
+#   }
+
+s_1 <- svd(combat_expr - rowMeans(combat_expr))
+PC1_1 <- s_1$d[1]*s_1$v[,1]
+PC2_1 <- s_1$d[2]*s_1$v[,2]
+data1 <- data.frame(PC1_1, PC2_1, "Data" = factor(data.batch))
+
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+
+colnames(data1) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, data1)
+
+data_combine$group <- c(rep("RawCounts", dim(data)[1]), 
+                        rep("ComBat-seq", dim(data1)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("RawCounts", "ComBat-seq"))
+
+ggplot(data_combine, aes(x = PC1, y = PC2, color = Data)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~group, scales = "free") +
+  labs(title = paste0("Fetal Adult Combined Data, n =",dim(genExp)[2],"-",dim(combat_expr)[2]), x = "", y = "") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5), 
+        strip.text.x = element_text(size = 14),
+        legend.title = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 14))
+
+#gene density
+library(vsn)
+library(hexbin)
+
+meanSdPlot(as.matrix(log2(.1+genExp)))
+meanSdPlot(as.matrix(log2(.1+genExp.final)))
+# Density after VST normalization
+plot_gen_density(genExp, xlim = c(-10,30), title_str = "Non-Normalized") 
+plot_gen_density(genExp.final, xlim = c(0,25), title_str = "VST Normalized")
+plot_gen_density(combat_expr, xlim = c(0,25), title_str = "VST Normalized & ComBat Batch Corr")
+```
+
+
+#Covariates
+##PCA via PCAforQTLs
+https://github.com/heatherjzhou/PCAForQTL/blob/master/README.Rmd
+- get PCA
+	- plot PCA scree plot
+- get which known covars are explained by PCA
+- regress out PCs & known covars that remain
+- plot svd (?) after regressing out  #PCs from elbow and # PCs from BE
+```{r}
+library(PCAForQTL)
+# Load data
+datExpr <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.batch.processed.tsv", data.table=F)
+rownames(datExpr) <- datExpr$V1
+datExpr <- datExpr[,-1]
+meta <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/combined_meta.tsv", header = T, data.table = F)
+
+#datExpr <- combat_expr
+#rm(combat_expr)
+
+#remove meta subjects that aren't in the final sample
+meta <- meta[which(meta$Subject %in% colnames(datExpr)),]
+rownames(meta) <- meta$Subject
+
+
+#std_datExpr <- standardize(t(datExpr))
+expr<-t(datExpr)
+meta <- meta %>% arrange(match(rownames(meta),rownames(expr)))
+dim(expr) # 1982 x 19057
+#write.table(meta, paste0(output_dir,"processed/", "meta_outliers_removed.tsv"), quote = F, row.names = F, col.names = T, sep = "\t")
+meta <- meta[,-1]
+
+# Generate covariates - PCA
+prcompResult<-prcomp(expr,center=T,scale.=T) #This should take less than a minute.
+PCs <-prcompResult$x 
+
+#inspect
+importanceTable<-summary(prcompResult)$importance
+PVEs<-importanceTable[2,]
+sum(PVEs) #Theoretically, this should be 1.
+plot(PVEs,xlab="PC index", ylab="PVE")
+
+##choosing # of PCs
+
+#`runElbow()` implements an automatic elbow detection method (based on distance to the diagonal line). In our experience, the number of PCs chosen using this method **tends to match the visual elbow point reasonably well**. To run this function, simply input the previously obtained `prcompResult`. This method selects $K=12$ for our example data.
+resultRunElbow<-PCAForQTL::runElbow(prcompResult=prcompResult)
+print(resultRunElbow) #36
+
+#`runBE()` implements the BE algorithm, a permutation-based approach for choosing $K$ in PCA. Intuitively, the BE algorithm retains PCs that explain more variance in the data than by random chance and discards those that do not. In our experience, the number of PCs chosen via BE **tends to signal an upper bound of the reasonable number of PCs to choose**. To run this function, we need to input the data matrix (must be observation by feature) and may optionally specify `B`, the number of permutations (default is 20), and `alpha`, the significance level (default is $0.05$). We may also specify `mc.cores` to change how many cores are used for parallel computing (default is `B` or the number of available cores minus 1, whichever is smaller). For reproducibility, Linux and Mac users must change the random number generator (RNG) type (unless `mc.cores` is 1) and set the seed. On the other hand, Windows users must set `mc.cores=1` to avoid error and set the seed for reproducibility (no need to change the RNG type).
+
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1)
+resultRunBE<-PCAForQTL::runBE(expr,B=20,alpha=0.05)
+print(resultRunBE$numOfPCsChosen) #92
+
+#Save topPCs given BE
+PCsTop<-PCs[,1:K_BE] #1982*92
+write.table(PCsTop, paste0(output_dir,dim(PCsTop)[2], "PCs.txt"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+#visualize number of PCs chosen
+K_elbow<-resultRunElbow #36
+K_BE<-resultRunBE$numOfPCsChosen #92
+#K_GTEx<-60 #GTEx uses 60 PEER factors, and they are almost identical to the top 60 PCs.
+PCAForQTL::makeScreePlot(prcompResult,labels=c("Elbow","BE"),values=c(K_elbow,K_BE),
+                         titleText="PCA QTL")
+
+ggplot2::ggsave(paste0(plot_dir, "PCAQTL.jpg"),width=16,height=11,unit="cm")
+```
+
+##get genotype PCs as covariates
+from fetal, HSB194, 1874, Br2416 do not have genotype data but do have genExp & metadata --- were removed as 'outliers' in the fetal .vcf file, but not detected as 'outliers' in the merged sample. Since genotype was merged from the outlier removed .vcf file, there is this discrepancy
+from adult CMC_MSSM_025, does not appear in the adult vcf file
+```{r}
+adult_rel <- read.table("/u/project/gandalm/kafadare/adult_EUR_related.txt", header = F, stringsAsFactors = F)[,1]
+fetal_rel <- read.table("/u/project/gandalm/cindywen/isoform_twas/genotype/all_data/isec_R2_greater_than_3/ancestry/related.txt", header = F, stringsAsFactors = F)[,1]
+rel <- as.data.frame(c(adult_rel, fetal_rel)) %>% set_colnames("genoID")
+outliers <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/outlier.txt", data.table = F, header= F)
+adult_geno_IDs <- fread("/u/project/gandalm/shared/GenomicDatasets-processed/PEC_AMP_AD_Arjun/Metadata/individual_20230421.csv", data.table = F)
+genoPCs <- fread("/u/home/k/kafadare/project-gandalm/isec/new_isec/plink.eigenvec", data.table = F)
+genoPCs$V1 <- NULL
+genoPCs <- genoPCs %>% dplyr::rename(genoID = V2)
+meta <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/meta_outliers_removed.tsv", header = T, data.table = F)
+rownames(meta) <- meta$Subject
+meta$Subject <- NULL
+index <- match(genoPCs$genoID, adult_geno_IDs$genotypingID)
+rel_index <- match(rel$genoID, adult_geno_IDs$genotypingID)
+#IDs with adult and fetal same ID, format to match formatting in meta & g
+a_IDs <- rownames(meta)[ grepl(".a$", rownames(meta))] %>% gsub(".a$", "", .)  %>% gsub("^X", "", .)
+adult_geno_IDs[which(adult_geno_IDs$individualID %in% a_IDs),2] <- adult_geno_IDs[which(adult_geno_IDs$individualID %in% a_IDs),2] %>% id_format_fix(.) %>% paste0(., ".a")
+
+#match genoIDs with individualIDs
+rel$IID <- adult_geno_IDs$individualID[rel_index]
+rel$IID[which(is.na(rel$IID))] <- rel$genoID[which(is.na(rel$IID))]
+rel$IID <- id_format_fix(rel$IID)
+
+genoPCs$IID <- adult_geno_IDs$individualID[index]
+genoPCs$IID[which(is.na(genoPCs$IID))] <- genoPCs$genoID[which(is.na(genoPCs$IID))]
+genoPCs$IID[grep("2:",genoPCs$IID)] <- genoPCs$IID[grep("2:",genoPCs$IID)] %>% gsub("2:", "", .) %>% paste0("X",.,".f")
+genoPCs$IID <- id_format_fix(genoPCs$IID)
+
+sum(genoPCs$IID %in% rownames(meta)) #1968
+
+odd_names <- genoPCs[which(!(genoPCs$IID %in% rownames(meta))),] #10 obs
+odd_names_compl <- meta[which(!(rownames(meta) %in% genoPCs$IID)),] #14 obs 
+#... do they just not have genotype PCs..?
+# genoPCs[which(genoPCs$genoID %in% adult_geno_IDs$genotypingID[match(rownames(odd_names_compl),adult_geno_IDs$individualID)]),]
+
+dim(odd_names[odd_names$IID %in% outliers$V1,]) #10 obs, all are outliers
+
+dim(odd_names_compl)[1]
+dim(odd_names_compl[(rownames(odd_names_compl) %in% rel$IID),])[1]# 10 samples not matching because they are removed from genotypes as 'related'
+odd_names_compl[(!(rownames(odd_names_compl) %in% rel$IID)),]
+
+#rename genoPC columns
+colnames(genoPCs) <- c("genoID",paste0("genoPC", 1:20, sep = ""), "IID")
+
+known_covs <- merge(genoPCs, meta, by.x = "IID", by.y = "row.names") %>% set_rownames(.$IID)
+#write.table(known_covs, paste0(output_dir,"processed/", "known_covs.tsv"), quote = F, row.names = F, col.names = T, sep = "\t")
+# write.table(known_covs[,c("IID", "genoID")], paste0(output_dir,"processed/", "genoID_IID_1968.txt"), quote = F, row.names = F, col.names = T, sep = "\t")
+# write.table(known_covs[,c("genoID")], paste0(output_dir,"processed/", "genoID_1968.txt"), quote = F, row.names = F, col.names = F, sep = "\t")
+# write.table(known_covs[,c("IID")], paste0(output_dir,"processed/", "IID_1968.txt"), quote = F, row.names = F, col.names = F, sep = "\t")
+#fix .fam file IDs
+fam <- fread("/u/home/k/kafadare/project-gandalm/isec/new_isec/merged_out.fam", data.table = F) 
+fam <- fam[which(fam$V2 %in% known_covs$genoID),]
+write.table(fam, paste0(output_dir,"processed/", "final_1968.fam"), quote = F, row.names = F, col.names = T, sep = "\t")
+```
+
+##combine covariates
+```{r}
+datExpr <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.batch.processed.tsv", data.table=F)
+rownames(datExpr) <- datExpr$V1
+datExpr <- datExpr[,-1]
+known_covs <- fread("~/project-gandalm/comb_data/new_data/processed/known_covs.tsv", data.table = F)
+rownames(known_covs) <- known_covs$IID
+known_covs <- known_covs[,-1]
+PCsTop <- fread("~/project-gandalm/comb_data/new_data/92PCs.txt", data.table = F)
+rownames(PCsTop) <- PCsTop$V1
+PCsTop <- PCsTop[,-1]
+PCsTop <- PCsTop[which(rownames(PCsTop) %in% rownames(known_covs)),] 
+PCsTop <- PCsTop %>% arrange(rownames(PCsTop), rownames(known_covs))
+
+expr <- as.data.frame(t(datExpr))
+expr <- expr[which(rownames(expr) %in% rownames(known_covs)),]
+expr <- expr %>% arrange(rownames(expr), rownames(known_covs))
+##Filter out known covariates
+identical(rownames(known_covs),rownames(PCsTop)) #TRUE is good
+identical(rownames(known_covs),rownames(expr)) #TRUE is good
+
+covs_filter <- known_covs %>% select(age, sex, spaste0("genoPC", 1:20, sep = "")) #use age rather than logPcd, because age is better distributed
+#Now we use `filterKnownCovariates()` to **filter out the known covariates that are captured well by the top PCs** (unadjusted $R^2\geq 0.9$ by default). This function returns the known covariates that should be kept. We use unadjusted $R^2$ instead of adjusted $R^2$ because we do not want to penalize for model complexity here. The cutoff value may be customized using the argument `unadjustedR2_cutoff`.
+knownCovariatesFiltered<-PCAForQTL::filterKnownCovariates(covs_filter,PCsTop,unadjustedR2_cutoff=0.90)
+##Age filtered when cutoff = 0.80
+
+#Finally, we combine the remaining known covariates and the top PCs and use them as covariates in the QTL analysis. To avoid potential numerical inaccuracies in the QTL analysis, you may optionally scale the PCs to unit variance, though theoretically this would not change the QTL result from regression-based methods such as Matrix eQTL and FastQTL.
+PCsTop<-scale(PCsTop) #Optional. Could be helpful for avoiding numerical inaccuracies.
+identical(rownames(knownCovariatesFiltered), rownames(PCsTop))#TRUE is good
+covariatesToUse<-cbind(knownCovariatesFiltered,PCsTop)
+write.table(covariatesToUse, paste0(output_dir,"processed/", "full_covs.txt"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+#try different number of PCs are covariates
+covariatesToUse<-cbind(knownCovariatesFiltered,PCsTop[,1:50])
+write.table(covariatesToUse, paste0(output_dir,"processed/", "full_covs_50PC.txt"), quote = F, row.names = T, col.names = T, sep = "\t")
+#try different number of PCs are c ovariates
+covariatesToUse<-cbind(knownCovariatesFiltered,PCsTop[,1:50])
+write.table(covariatesToUse, paste0(output_dir,"processed/", "full_covs_50PC.txt"), quote = F, row.names = T, col.names = T, sep = "\t")
+#try different number of PCs are covariates
+write.table(knownCovariatesFiltered, paste0(output_dir,"processed/", "full_covs_noPC.txt"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+
+##look at correlation between PCs and batch
+PCs_study<-as.data.frame(cbind(known_covs[,'study'],PCsTop[,1:5]))
+library(ggcorrplot)
+model.matrix(~0+., data=PCs_study) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+
+```
+
+##correlations between covariates
+```{r}
+corr <- cor(t(X))
+# Filter the correlation matrix for correlations > 0.5
+# Find variables with at least one correlation > 0.5
+# Find variables with at least one correlation > 0.5
+selected_vars <- colnames(corr)[apply(abs(corr) > 0.5, 1, function(x) sum(x) > 1)]
+
+# Filter the correlation matrix for selected variables
+corr_high <- corr[which(rownames(corr) %in% selected_vars), selected_vars]
+
+# Create a heatmap of the filtered correlation matrix
+ggplot(data = reshape2::melt(corr_high), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "blue", limits = c(0, 1)) +
+  labs(title = "Correlation Heatmap (Correlations > 0.5)")
+```
+
+
+
+#Regress out the Covariates
+##Regress out
+cov with variables as colnames, sample ids as rownames
+datExpr with sample id as colnames, gene id as rownames
+```{r}
+cov <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/full_covs.txt",header = T, stringsAsFactors = F, check.names = F)
+#try different number of PCs
+cov36 <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/full_covs_36PC.txt",header = T, stringsAsFactors = F, check.names = F)
+cov50 <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/full_covs_50PC.txt",header = T, stringsAsFactors = F, check.names = F)
+cov75 <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/full_covs_75PC.txt",header = T, stringsAsFactors = F, check.names = F)
+covnoPC <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/full_covs_noPC.txt",header = T, stringsAsFactors = F, check.names = F)
+datExpr <- fread("/u/home/k/kafadare/project-gandalm/comb_data/new_data/processed/counts.batch.processed.tsv", data.table=F)
+rownames(datExpr) <- datExpr$V1
+datExpr <- datExpr[,-1]
+datExpr <- datExpr[,which(colnames(datExpr) %in% rownames(cov))]
+order <- as.character(rownames(cov))
+datExpr <- datExpr[, order]
+identical(rownames(cov), colnames(datExpr))#TRUE
+
+cov_vars <- colnames(cov)
+cov <- as.matrix(cbind(1, cov))
+storage.mode(cov) <- "numeric"
+Y <- as.matrix(datExpr)
+X <- as.matrix(cov)
+beta <- (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+datExpr_regressed <- Y - t(X[,-1]  %*% beta[-1,])
+write.table(datExpr_regressed, paste0(output_dir,"processed/", "genExp_covRegOut.tsv"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+#try different number of PCs
+cov_vars36 <- colnames(cov36)
+cov36 <- as.matrix(cbind(1, cov36))
+storage.mode(cov36) <- "numeric"
+Y <- as.matrix(datExpr)
+X <- as.matrix(cov36)
+beta <- (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+datExpr_regressed36 <- Y - t(X[,-1]  %*% beta[-1,])
+write.table(datExpr_regressed36, paste0(output_dir,"processed/", "genExp_cov36RegOut.tsv"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+cov_vars50 <- colnames(cov50)
+cov50 <- as.matrix(cbind(1, cov50))
+storage.mode(cov50) <- "numeric"
+Y <- as.matrix(datExpr)
+X <- as.matrix(cov50)
+beta <- (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+datExpr_regressed50 <- Y - t(X[,-1]  %*% beta[-1,])
+write.table(datExpr_regressed50, paste0(output_dir,"processed/", "genExp_cov50RegOut.tsv"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+cov_vars75 <- colnames(cov75)
+cov75 <- as.matrix(cbind(1, cov75))
+storage.mode(cov75) <- "numeric"
+Y <- as.matrix(datExpr)
+X <- as.matrix(cov75)
+beta <- (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+datExpr_regressed75 <- Y - t(X[,-1]  %*% beta[-1,])
+write.table(datExpr_regressed75, paste0(output_dir,"processed/", "genExp_cov75RegOut.tsv"), quote = F, row.names = T, col.names = T, sep = "\t")
+
+cov_varsnoPC <- colnames(covnoPC)
+covnoPC <- as.matrix(cbind(1, covnoPC))
+storage.mode(covnoPC) <- "numeric"
+Y <- as.matrix(datExpr)
+X <- as.matrix(covnoPC)
+beta <- (solve(t(X)%*%X)%*%t(X))%*%t(Y)
+datExpr_regressednoPC <- Y - t(X[,-1]  %*% beta[-1,])
+write.table(datExpr_regressednoPC, paste0(output_dir,"processed/", "genExp_covnoPCRegOut.tsv"), quote = F, row.names = T, col.names = T, sep = "\t")
+```
+
+
+##visualize 
+```{r}
+known_covs <- fread("~/project-gandalm/comb_data/new_data/processed/known_covs.tsv", data.table = F)
+dat_regOut <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_covRegOut.tsv", data.table = F)
+rownames(dat_regOut) <- dat_regOut$V1
+dat_regOut <- dat_regOut[,-1]
+
+#plot_gen_density(dat_regOut, title_str = "Merged, Cov Reg Out, N = 1968", xlim = c(-10,30), ylim = c(0,1), log = F)
+
+
+data.batch <- c()
+  ##need to get data.batch
+  for (i in 1:ncol(datExpr)) {
+    sample <- colnames(datExpr)[i]
+    #match the sample to id in meta file and find corresponding "study"
+    data.batch[i] <- known_covs[which(known_covs$IID %in% sample), "study"]
+  }  
+
+s <- svd(datExpr - rowMeans(datExpr))
+PC1 <- s$d[1]*s$v[,1]
+PC2 <- s$d[2]*s$v[,2] 
+data <- data.frame(PC1, PC2, "Data" = factor(data.batch)) 
+ 
+    
+# data.batch1 <- c()
+#   ##need to get data.batch
+#   for (i in 1:ncol(combat_expr)) {
+#     sample <- colnames(combat_expr)[i]
+#     #match the sample to id in meta file and find corresponding "study"
+#     data.batch1[i] <- meta[which(meta$Subject %in% sample), "study"]
+#   }
+
+s_1 <- svd((dat_regOut) - rowMeans(dat_regOut))
+PC1_1 <- s_1$d[1]*s_1$v[,1]
+PC2_1 <- s_1$d[2]*s_1$v[,2]
+data1 <- data.frame(PC1_1, PC2_1, "Data" = factor(data.batch))
+
+#other number of PCs regOut
+dat_regOut36 <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_cov36RegOut.tsv", data.table = F)
+rownames(dat_regOut36) <- dat_regOut36$V1
+dat_regOut36 <- dat_regOut36[,-1]
+
+plot_gen_density(dat_regOut36, title_str = "Merged, Cov Reg Out, N = 1968", xlim = c(-10,30), ylim = c(0,1), log = F)
+
+s_36 <- svd((dat_regOut36) - rowMeans((dat_regOut36)))
+PC1_36 <- s_36$d[1]*s_36$v[,1]
+PC2_36 <- s_36$d[2]*s_36$v[,2]
+data36 <- data.frame(PC1_36, PC2_36, "Data" = factor(data.batch))
+
+#other number of PCs regOut
+dat_regOut50 <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_cov50RegOut.tsv", data.table = F)
+rownames(dat_regOut50) <- dat_regOut50$V1
+dat_regOut50 <- dat_regOut50[,-1]
+
+plot_gen_density(dat_regOut50, title_str = "Merged, Cov Reg Out, N = 1968", xlim = c(-10,30), ylim = c(0,1), log = F)
+
+s_50 <- svd((dat_regOut50) - rowMeans((dat_regOut50)))
+PC1_50 <- s_50$d[1]*s_50$v[,1]
+PC2_50 <- s_50$d[2]*s_50$v[,2]
+data50 <- data.frame(PC1_50, PC2_50, "Data" = factor(data.batch))
+
+#other number of PCs regOut
+dat_regOut75 <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_cov75RegOut.tsv", data.table = F)
+rownames(dat_regOut75) <- dat_regOut75$V1
+dat_regOut75 <- dat_regOut75[,-1]
+
+plot_gen_density(dat_regOut75, title_str = "Merged, Cov Reg Out, N = 1968", xlim = c(-10,30), ylim = c(0,1), log = F)
+
+s_75 <- svd((dat_regOut75) - rowMeans((dat_regOut75)))
+PC1_75 <- s_75$d[1]*s_75$v[,1]
+PC2_75 <- s_75$d[2]*s_75$v[,2]
+data75 <- data.frame(PC1_75, PC2_75, "Data" = factor(data.batch))
+
+#other number of PCs regOut
+dat_regOutnoPC <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_covnoPCRegOut.tsv", data.table = F)
+rownames(dat_regOutnoPC) <- dat_regOutnoPC$V1
+dat_regOutnoPC <- dat_regOutnoPC[,-1]
+
+plot_gen_density(dat_regOutnoPC, title_str = "Merged, Cov Reg Out, N = 1968", xlim = c(-10,30), ylim = c(0,1), log = F)
+
+s_noPC <- svd((dat_regOutnoPC) - rowMeans((dat_regOutnoPC)))
+PC1_noPC <- s_noPC$d[1]*s_noPC$v[,1]
+PC2_noPC <- s_noPC$d[2]*s_noPC$v[,2]
+datanoPC <- data.frame(PC1_noPC, PC2_noPC, "Data" = factor(data.batch))
+
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+
+colnames(data1) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, data1)
+
+data_combine$group <- c(rep("ComBat", dim(data)[1]), 
+                        rep("Cov Reg Out", dim(data1)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("ComBat", "Cov Reg Out"))
+
+##
+
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+
+colnames(data36) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, data36)
+
+data_combine$group <- c(rep("ComBat", dim(data)[1]), 
+                        rep("Cov Reg Out", dim(data36)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("ComBat", "Cov Reg Out"))
+
+##
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+
+colnames(data50) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, data50)
+
+data_combine$group <- c(rep("ComBat", dim(data)[1]), 
+                        rep("Cov Reg Out", dim(data50)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("ComBat", "Cov Reg Out"))
+
+##
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+
+colnames(data75) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, data75)
+
+data_combine$group <- c(rep("ComBat", dim(data)[1]), 
+                        rep("Cov Reg Out", dim(data75)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("ComBat", "Cov Reg Out"))
+
+##
+#plot
+options(repr.plot.width = 12, repr.plot.height = 6)
+colnames(datanoPC) <- c("PC1", "PC2", "Data")
+data_combine <- rbind(data, datanoPC)
+
+data_combine$group <- c(rep("ComBat", dim(data)[1]), 
+                        rep("Cov Reg Out", dim(datanoPC)[1]))
+data_combine$group <- factor(data_combine$group, levels = c("ComBat", "Cov Reg Out"))
+
+
+##
+
+ggplot(data_combine, aes(x = PC1, y = PC2, color = Data)) +
+  geom_point(alpha = 0.5) +
+  facet_wrap(~group, scales = "free") +
+  labs(title = paste0("Fetal Adult Combined Data, n =",dim(datExpr )[2],"-",dim(dat_regOut)[2]), x = "", y = "") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        strip.text.x = element_text(size = 14),
+        legend.title = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 14))
+
+
+##look at outliers in the SVD
+identical(rownames(dat_regOut), rownames(datExpr))#TRUE
+identical(colnames(dat_regOut), known_covs$IID)#TRUE
+known_covs$svd_PC1 <- PC1_1
+known_covs$svd_PC2 <- PC2_1
+outliers <- known_covs %>% filter(PC1_1 < -5 & PC2_1 < 0)
+out_genExp <- datExpr[,colnames(datExpr) %in% outliers$IID]
+plot_gen_density(out_genExp, title_str = "Outliers in SVD", xlim = c(-10,30), ylim = c(0,1), log = F)
+PCsTop <- fread("~/project-gandalm/comb_data/new_data/92PCs.txt", data.table = F)
+rownames(PCsTop) <- PCsTop$V1
+PCsTop <- PCsTop[,-1]
+PCsTop <- PCsTop[which(rownames(PCsTop) %in% known_covs$IID),] 
+PCsTop <- PCsTop %>% arrange(match(rownames(PCsTop), known_covs$IID))
+identical(rownames(PCsTop), known_covs$IID) #TRUE
+outliers <- outliers %>% merge(.,PCsTop, by.x = "IID", by.y = "row.names")
+PCsTop$outlier <- ifelse(rownames(PCsTop) %in% outliers$IID, "1", "0")
+
+ggplot(outliers, aes(x = PC1, y = PC2, color = age)) +
+  geom_point(alpha = 0.5) +
+  labs(title = paste0("SVD outliers PC, n =",dim(outliers)[1]), x = "", y = "") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        strip.text.x = element_text(size = 14),
+        legend.title = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 14))
+
+ggplot(PCsTop, aes(x = PC3, y = PC4, color = outlier)) +
+  geom_point(alpha = 0.5) +
+  labs(title = paste0("SVD outliers PC, n =",dim(outliers)[1]), x = "", y = "") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 16),
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        strip.text.x = element_text(size = 14),
+        legend.title = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 14))
+
+```
+#Prep genExp format for MESC
+```{r}
+datExp <- fread("/u/project/gandalm/kafadare/comb_data/new_data/processed/genExp_covRegOut.tsv", data.table = F)
+ids <- read.table("/u/project/gandalm/kafadare/comb_data/new_data/processed/genoID_IID_1968.txt", header = T)
+gtf <- fread("/u/project/gandalm/kafadare/comb_data/new_data/gene_info_comb.tsv", data.table = F)
+index <- match(colnames(datExp[,2:ncol(datExp)]), ids$IID)
+colnames(datExp) <- c("GENE", ids$genoID[index])
+datExp <- merge(datExp, gtf, by.x = "GENE", by.y = "genid", all = TRUE)
+datExp <- datExp[, c(1, ncol(datExp)-3, ncol(datExp)-2, ncol(datExp)-1, ncol(datExp), 2:(ncol(datExp)-4))]
+
+# special note! strand; 0/1-based conversion
+for (i in 1:dim(datExp)[1]){
+	if (datExp[i,4] == "+") {
+		gtf_start=datExp[i,2]
+	  datExp[i,2]=gtf_start-1
+		datExp[i,3]=gtf_start
+	}
+	else if (datExp[i,4] == "-") {
+		gtf_end=datExp[i,3]
+		datExp[i,2]=gtf_end-1
+		datExp[i,3]=gtf_end
+	}
+}
+
+datExp <- datExp[order(datExp$Chr, datExp$start),] %>% select(., -c("end","strand"))
+
+colnames(datExp)[1:3] <- c("GENE", "CHR", "GENE_COORD")
+
+write.table(datExp, paste0(output_dir,"processed/","genExp_regOut_mesc_format.bed"), quote=F, sep="\t", row.names=F, col.names=T)
+```
